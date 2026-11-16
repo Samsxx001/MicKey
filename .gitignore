@@ -1,0 +1,7 @@
+/target/
+*.exe
+/dist/
+/package/
+/work/
+*.previous
+TEST-RESULTS.md
