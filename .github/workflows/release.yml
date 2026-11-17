@@ -41,7 +41,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           New-Item -ItemType Directory -Path dist, package | Out-Null
           Copy-Item target/release/mickey.exe dist/MicKey.exe
-          Copy-Item dist/MicKey.exe, README.md, LICENSE, CHANGELOG.md package/
+          Copy-Item dist/MicKey.exe, README.txt, LICENSE, CHANGELOG.md package/
           Compress-Archive -Path package/* -DestinationPath dist/MicKey-windows-x86_64.zip
           $lines = Get-ChildItem dist -File | Sort-Object Name | ForEach-Object {
             '{0}  {1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name
