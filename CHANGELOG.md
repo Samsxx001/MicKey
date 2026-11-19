@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.1
+
+- Keep the settings window hidden in the system tray during display and scaling changes.
+- Preserve explicit settings, close-to-tray, and exit behavior.
+
 ## 1.3.0
 
 - Add a Check for updates command in settings and the tray menu.
