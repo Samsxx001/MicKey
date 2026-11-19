@@ -524,6 +524,20 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             hide_settings();
             LRESULT(0)
         }
+        WM_WINDOWPOSCHANGING if lp.0 != 0 => {
+            // Display and DPI changes can cause Windows to show an otherwise
+            // hidden top-level window. Only an explicit settings request should
+            // reveal the tray window; preserve the taskbar fallback if no tray.
+            let keep_hidden = APP.with(|a| {
+                let a = a.borrow();
+                !a.visible && a.tray_available
+            });
+            if keep_hidden {
+                let pos = unsafe { &mut *(lp.0 as *mut WINDOWPOS) };
+                pos.flags &= !SWP_SHOWWINDOW;
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+        }
         WM_SIZE if wp.0 as u32 == SIZE_MINIMIZED => {
             let tray = APP.with(|a| {
                 let mut a = a.borrow_mut();
@@ -541,7 +555,13 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             LRESULT(0)
         }
         WM_SYSCOMMAND if wp.0 as u32 & 0xfff0 == SC_RESTORE => {
-            show_settings();
+            let allow_restore = APP.with(|a| {
+                let a = a.borrow();
+                a.visible || !a.tray_available
+            });
+            if allow_restore {
+                show_settings();
+            }
             LRESULT(0)
         }
         WM_ACTIVATE if wp.0 & 0xffff == WA_INACTIVE as usize => {
@@ -787,8 +807,35 @@ fn run(smoke: bool, require_tray: bool) -> Result<()> {
                     "Close-to-tray check failed",
                 ));
             }
+            if has_tray {
+                SendMessageW(hwnd, WM_DISPLAYCHANGE, Some(WPARAM(32)), Some(LPARAM(0)));
+                SendMessageW(
+                    hwnd,
+                    WM_SYSCOMMAND,
+                    Some(WPARAM(SC_RESTORE as usize)),
+                    Some(LPARAM(0)),
+                );
+                let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                let stayed_hidden =
+                    !IsWindowVisible(hwnd).as_bool() && APP.with(|a| !a.borrow().visible);
+                eprintln!("Display change: stayed_hidden={stayed_hidden}");
+                show_settings();
+                let restored = IsWindowVisible(hwnd).as_bool() && APP.with(|a| a.borrow().visible);
+                SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+                let closed = !IsWindowVisible(hwnd).as_bool() && APP.with(|a| !a.borrow().visible);
+                eprintln!("Settings: restored={restored}, close_to_tray={closed}");
+                if !stayed_hidden || !restored || !closed {
+                    close_test_error = Some(windows::core::Error::new(
+                        E_FAIL,
+                        "Display change/window visibility check failed",
+                    ));
+                }
+            }
             eprintln!("Closing test window");
-            let _ = DestroyWindow(hwnd);
+            SendMessageW(hwnd, WM_COMMAND, Some(WPARAM(QUIT)), Some(LPARAM(0)));
+            if IsWindow(Some(hwnd)).as_bool() {
+                close_test_error = Some(windows::core::Error::new(E_FAIL, "Exit command failed"));
+            }
         } else if !tray_available || !path.exists() || load(&path).is_err() {
             show_settings();
         }
