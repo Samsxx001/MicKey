@@ -27,6 +27,8 @@ const CANCEL: usize = 103;
 const SETTING: usize = 201;
 const QUIT: usize = 202;
 const CHECK_UPDATES: usize = 203;
+const TRAY_RETRY_TIMER: usize = 301;
+const TRAY_FALLBACK_ATTEMPTS: u32 = 10;
 
 struct App {
     hwnd: HWND,
@@ -40,6 +42,8 @@ struct App {
     recording: bool,
     candidate: Option<Shortcut>,
     tray_available: bool,
+    tray_retry_count: u32,
+    forced_tray_failure: bool,
     icons: Option<icons::Icons>,
     mic_state: icons::State,
     testing: bool,
@@ -59,6 +63,8 @@ impl Default for App {
             recording: false,
             candidate: None,
             tray_available: false,
+            tray_retry_count: 0,
+            forced_tray_failure: false,
             icons: None,
             mic_state: icons::State::Unknown,
             testing: false,
@@ -275,24 +281,40 @@ fn show_settings() {
 fn hide_settings() {
     // Explorer may have restarted, or tray registration may have failed earlier.
     ensure_tray();
-    let (hwnd, tray) = APP.with(|a| {
+    let hwnd = APP.with(|a| {
         let mut a = a.borrow_mut();
         a.visible = false;
         a.recording = false;
         a.candidate = None;
         a.keys.cancel();
-        (a.hwnd, a.tray_available)
+        a.hwnd
     });
     unsafe {
-        let _ = ShowWindow(hwnd, if tray { SW_HIDE } else { SW_MINIMIZE });
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+    if !APP.with(|a| a.borrow().tray_available) {
+        retry_tray(hwnd);
+    }
+}
+
+fn retry_tray(hwnd: HWND) {
+    APP.with(|a| a.borrow_mut().tray_retry_count = 0);
+    unsafe {
+        if SetTimer(Some(hwnd), TRAY_RETRY_TIMER, 1000, None) == 0 {
+            // A minimized taskbar window remains accessible if no timer is available.
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+        }
     }
 }
 
 fn ensure_tray() -> bool {
+    if APP.with(|a| a.borrow().forced_tray_failure) {
+        APP.with(|a| a.borrow_mut().tray_available = false);
+        return false;
+    }
     let data = tray_data();
-    let registered = APP.with(|a| a.borrow().tray_available);
     let available = unsafe {
-        (registered && Shell_NotifyIconW(NIM_MODIFY, &data).as_bool())
+        Shell_NotifyIconW(NIM_MODIFY, &data).as_bool()
             || Shell_NotifyIconW(NIM_ADD, &data).as_bool()
     };
     APP.with(|a| a.borrow_mut().tray_available = available);
@@ -524,6 +546,31 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             hide_settings();
             LRESULT(0)
         }
+        WM_TIMER if wp.0 == TRAY_RETRY_TIMER => {
+            if ensure_tray() {
+                unsafe {
+                    let _ = KillTimer(Some(hwnd), TRAY_RETRY_TIMER);
+                }
+                let visible = APP.with(|a| a.borrow().visible);
+                if !visible {
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_HIDE);
+                    }
+                }
+            } else {
+                let fallback = APP.with(|a| {
+                    let mut a = a.borrow_mut();
+                    a.tray_retry_count = a.tray_retry_count.saturating_add(1);
+                    !a.visible && a.tray_retry_count == TRAY_FALLBACK_ATTEMPTS
+                });
+                if fallback {
+                    unsafe {
+                        let _ = ShowWindow(hwnd, SW_MINIMIZE);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_WINDOWPOSCHANGING if lp.0 != 0 => {
             // Display and DPI changes can cause Windows to show an otherwise
             // hidden top-level window. Only an explicit settings request should
@@ -592,16 +639,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             let taskbar = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
             if taskbar != 0 && msg == taskbar {
                 update_status();
-                let available = unsafe { Shell_NotifyIconW(NIM_ADD, &tray_data()).as_bool() };
-                let visible = APP.with(|a| {
-                    let mut a = a.borrow_mut();
-                    a.tray_available = available;
-                    a.visible
-                });
+                APP.with(|a| a.borrow_mut().tray_available = false);
+                let available = ensure_tray();
+                let visible = APP.with(|a| a.borrow().visible);
                 if !visible {
                     unsafe {
-                        let _ = ShowWindow(hwnd, if available { SW_HIDE } else { SW_MINIMIZE });
+                        let _ = ShowWindow(hwnd, SW_HIDE);
                     }
+                }
+                if !available {
+                    retry_tray(hwnd);
                 }
                 LRESULT(0)
             } else {
@@ -808,6 +855,43 @@ fn run(smoke: bool, require_tray: bool) -> Result<()> {
                 ));
             }
             if has_tray {
+                APP.with(|a| a.borrow_mut().forced_tray_failure = true);
+                let taskbar = RegisterWindowMessageW(w!("TaskbarCreated"));
+                SendMessageW(hwnd, taskbar, Some(WPARAM(0)), Some(LPARAM(0)));
+                SendMessageW(
+                    hwnd,
+                    WM_TIMER,
+                    Some(WPARAM(TRAY_RETRY_TIMER)),
+                    Some(LPARAM(0)),
+                );
+                let hidden_during_failure = !IsWindowVisible(hwnd).as_bool();
+                for _ in 1..TRAY_FALLBACK_ATTEMPTS {
+                    SendMessageW(
+                        hwnd,
+                        WM_TIMER,
+                        Some(WPARAM(TRAY_RETRY_TIMER)),
+                        Some(LPARAM(0)),
+                    );
+                }
+                let taskbar_fallback = IsIconic(hwnd).as_bool() && IsWindowVisible(hwnd).as_bool();
+                APP.with(|a| a.borrow_mut().forced_tray_failure = false);
+                SendMessageW(
+                    hwnd,
+                    WM_TIMER,
+                    Some(WPARAM(TRAY_RETRY_TIMER)),
+                    Some(LPARAM(0)),
+                );
+                let tray_recovered =
+                    APP.with(|a| a.borrow().tray_available) && !IsWindowVisible(hwnd).as_bool();
+                eprintln!(
+                    "Tray restart: hidden_during_failure={hidden_during_failure}, taskbar_fallback={taskbar_fallback}, recovered={tray_recovered}"
+                );
+                if !hidden_during_failure || !taskbar_fallback || !tray_recovered {
+                    close_test_error = Some(windows::core::Error::new(
+                        E_FAIL,
+                        "Tray recovery check failed",
+                    ));
+                }
                 SendMessageW(hwnd, WM_DISPLAYCHANGE, Some(WPARAM(32)), Some(LPARAM(0)));
                 SendMessageW(
                     hwnd,
