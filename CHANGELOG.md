@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.2
+
+- Keep the window hidden while the Windows notification area restarts during display changes.
+- Retry tray icon registration and fall back to a minimized taskbar window if the tray remains unavailable.
+
 ## 1.3.1
 
 - Keep the settings window hidden in the system tray during display and scaling changes.
